@@ -41,8 +41,10 @@ impl ToScrape{
     fn getting_path() -> Result<PathBuf, ScrapingError>{
         let mut answer = String::new();
 
-        println!("Write a path to urls: ");
+        print!("Write a path to urls: ");
+        std::io::stdout().flush().unwrap();
 
+        
         match stdin().read_line(&mut answer){
             Ok(_) => {},
             Err(_) => return Err(ScrapingError::ErrorReadingUserInput),
