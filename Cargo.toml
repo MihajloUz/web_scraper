@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 tokio = {version = "1", features = ["full"]}
 native-tls = "0.2"
+tokio-native-tls = "0.3"

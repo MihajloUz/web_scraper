@@ -1,11 +1,12 @@
+use std::io::Write;
 use std::io::{stdin};
-use std::fs;
 use std::path::{PathBuf};
 use std::ffi::OsStr;
-use std::net::TcpStream;
-use native_tls::TlsConnector;
-use std::io::{Read, Write};
-
+use tokio::net::TcpStream;
+use tokio::io::{AsyncWriteExt, AsyncReadExt};
+use std::fmt::Error;
+use tokio_native_tls::TlsConnector;
+use native_tls::TlsConnector as NativeTlsConnector;
 
 #[derive(Debug)]
 pub enum ScrapingError{
@@ -20,14 +21,13 @@ pub enum ScrapingError{
     ErrorCreatingAFile,
     ErrorWritingToAFile,
 }
-
 enum FileType{
     Unknown,
     CSV, 
     JSON,
 }
 pub struct ToScrape{
-    websites: Vec<String>,
+    pub websites: Vec<String>,
     file_type: FileType,
 }
 impl ToScrape{
@@ -55,7 +55,7 @@ impl ToScrape{
     pub fn read_file(&mut self) -> Result<(), ScrapingError> {
         let path = Self::getting_path()?;
         
-        let content = match fs::read_to_string(&path){
+        let content = match std::fs::read_to_string(&path){
             Ok(value) => {value},
             Err(_) => return Err(ScrapingError::ErrorReadingFile),
         }; 
@@ -87,86 +87,34 @@ impl ToScrape{
     } 
 }
 
-pub struct Scraping{
-    data: Vec<String>, 
-}
+pub async fn scrape(website: String) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut chopped = website
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .splitn(2, '/');
 
-impl Scraping{
-    pub fn new() -> Self{
-        Self{
-            data: Vec::new(),
-        }
-    }
-    pub fn scrape(&mut self, info: &ToScrape) -> Vec<(String, ScrapingError)>{
-        let mut errors: Vec<(String, ScrapingError)> = Vec::new(); 
-        for website in &info.websites{
+    let (host, path) = (chopped.next().unwrap_or(&website), chopped.next().unwrap_or(""));
+    let native_connector = NativeTlsConnector::new()?;
+    let connector = TlsConnector::from(native_connector);
 
-            let mut chopped = website
-                .trim_start_matches("https://")
-                .trim_start_matches("http://")
-                .splitn(2, '/');
+    let stream = TcpStream::connect(format!("{}:443", host)).await?;
+    let mut tls_stream = connector.connect(host, stream).await?;
+    
+    let request = format!(
+        "GET /{} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nAccept-Encoding: identity\r\n\r\n",
+        path, host
+    );
 
-            let (host, path) = (chopped.next().unwrap_or(website), chopped.next().unwrap_or(""));
-            
-            let connector = match TlsConnector::new() {
-                Ok(value) => {value},
-                Err(_) => {
-                    errors.push((host.to_string(), ScrapingError::ErrorTlsConnector));
-                    continue;
-                },
-            };
-            let stream = match TcpStream::connect(format!("{}:443", host.to_string())){
-                Ok(value) => {value},
-                Err(_) => {
-                    errors.push((host.to_string(), ScrapingError::ErrorTcpConnection));
-                    continue;
-                },
-            };  
-            let mut stream = match connector.connect(host, stream){
-                Ok(value) => {value},
-                Err(_) => {
-                    errors.push((host.to_string(), ScrapingError::ErrorStreamConnection));
-                    continue;
-                },
-            };
-
-            let request = format!(
-                "GET /{} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nAccept-Encoding: identity\r\n\r\n",
-                path, host
-            );
-
-            match stream.write_all(request.as_bytes()){
-                Ok(_) => {},
-                Err(_) => {
-                    errors.push((host.to_string(), ScrapingError::ErrorWriteDataToStream));
-                    continue;
-                },
-            }
-            
-            let mut response = String::new();
-            match stream.read_to_string(&mut response){
-                Ok(_) => {},
-                Err(_) => {
-                    errors.push((host.to_string(), ScrapingError::ErrorReadingDataFromStream));
-                    continue;
-                },
-            }
-            
-            let mut file = if let Ok(f) = std::fs::File::create(format!("{}.txt", host)){
-                f
-            }else{
-                errors.push(("".to_string(), ScrapingError::ErrorCreatingAFile));
-                continue;
-            };
-            match file.write_all(response.as_bytes()){
-                Ok(_) => {},
-                Err(_) => {
-                    errors.push(("".to_string(), ScrapingError::ErrorWritingToAFile));
-                    continue;
-                },
-            };
-            self.data.push(response.clone());
-        }
-        errors
-    }
+    tls_stream.write_all(request.as_bytes()).await?;
+    
+    let mut response = String::new();
+    tls_stream.read_to_string(&mut response).await?;
+    
+    let mut file = if let Ok(f) = tokio::fs::File::create(format!("{}.txt", host)).await{
+        f
+    }else{
+        return Err(Box::new(Error));
+    };
+    file.write_all(response.as_bytes()).await?;
+    Ok(())
 }
